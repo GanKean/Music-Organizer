@@ -1,21 +1,51 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from db import (
+from Database import (
     init_db,
+    get_connection,
+    create_song,
     get_all_songs,
-    search_songs,
-    add_song,
     update_song,
     delete_song,
-    get_all_playlists,
     create_playlist,
     delete_playlist,
-    get_songs_for_playlist,
     add_song_to_playlist,
     remove_song_from_playlist,
+    search_songs_by_name,
+    search_songs_by_genre,
 )
 
+def fetch_all_playlists():
+    """Return list of dicts: [{'id': ..., 'name': ...}, ...]."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM playlists ORDER BY name COLLATE NOCASE")
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def fetch_songs_for_playlist(playlist_id):
+    """Return list of dicts for the songs in a playlist."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT s.id, s.name, s.artist, s.genre
+        FROM songs s
+        JOIN playlist_songs ps ON s.id = ps.song_id
+        WHERE ps.playlist_id = ?
+        ORDER BY s.name COLLATE NOCASE
+        """,
+        (playlist_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+# --------------------------- LIBRARY TAB --------------------------- #
 
 class LibraryTab(tk.Frame):
     """Library tab: shows all songs, search, and add/edit/delete form."""
@@ -23,7 +53,8 @@ class LibraryTab(tk.Frame):
     def __init__(self, master, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
 
-        self.songs = []          # list of (id, title, artist, album, genre, year)
+        # list of dicts: {'id', 'name', 'artist', 'genre'}
+        self.songs = []
         self.selected_song_id = None
 
         self._build_search_area()
@@ -32,7 +63,7 @@ class LibraryTab(tk.Frame):
 
         self.refresh_songs()
 
-    # ---------- UI builders ----------
+    # UI sections
 
     def _build_search_area(self):
         frame = tk.LabelFrame(self, text="Search")
@@ -42,17 +73,11 @@ class LibraryTab(tk.Frame):
         self.search_entry = tk.Entry(frame, width=30)
         self.search_entry.grid(row=0, column=1, padx=5, pady=5)
 
-        tk.Label(frame, text="Field:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
-
-        self.search_field = tk.StringVar(value="title")
-        field_menu = ttk.Combobox(
-            frame,
-            textvariable=self.search_field,
-            values=["title", "genre", "both"],
-            width=8,
-            state="readonly",
-        )
-        field_menu.grid(row=0, column=3, padx=5, pady=5)
+        self.search_field = tk.StringVar(value="name")
+        rb_name = tk.Radiobutton(frame, text="By Name", variable=self.search_field, value="name")
+        rb_genre = tk.Radiobutton(frame, text="By Genre", variable=self.search_field, value="genre")
+        rb_name.grid(row=0, column=2, padx=5, pady=5)
+        rb_genre.grid(row=0, column=3, padx=5, pady=5)
 
         btn_search = tk.Button(frame, text="Search", command=self.search_songs)
         btn_search.grid(row=0, column=4, padx=5, pady=5)
@@ -64,7 +89,6 @@ class LibraryTab(tk.Frame):
         frame = tk.LabelFrame(self, text="Songs")
         frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # scrollbar + listbox
         scrollbar = tk.Scrollbar(frame)
         scrollbar.pack(side="right", fill="y")
 
@@ -79,29 +103,20 @@ class LibraryTab(tk.Frame):
         frame = tk.LabelFrame(self, text="Song Details")
         frame.pack(fill="x", padx=10, pady=5)
 
-        # Labels
         tk.Label(frame, text="Title:").grid(row=0, column=0, sticky="e", padx=5, pady=2)
         tk.Label(frame, text="Artist:").grid(row=1, column=0, sticky="e", padx=5, pady=2)
-        tk.Label(frame, text="Album:").grid(row=2, column=0, sticky="e", padx=5, pady=2)
-        tk.Label(frame, text="Genre:").grid(row=3, column=0, sticky="e", padx=5, pady=2)
-        tk.Label(frame, text="Year:").grid(row=4, column=0, sticky="e", padx=5, pady=2)
+        tk.Label(frame, text="Genre:").grid(row=2, column=0, sticky="e", padx=5, pady=2)
 
-        # Entries
         self.entry_title = tk.Entry(frame, width=35)
         self.entry_artist = tk.Entry(frame, width=35)
-        self.entry_album = tk.Entry(frame, width=35)
         self.entry_genre = tk.Entry(frame, width=35)
-        self.entry_year = tk.Entry(frame, width=10)
 
         self.entry_title.grid(row=0, column=1, padx=5, pady=2)
         self.entry_artist.grid(row=1, column=1, padx=5, pady=2)
-        self.entry_album.grid(row=2, column=1, padx=5, pady=2)
-        self.entry_genre.grid(row=3, column=1, padx=5, pady=2)
-        self.entry_year.grid(row=4, column=1, padx=5, pady=2, sticky="w")
+        self.entry_genre.grid(row=2, column=1, padx=5, pady=2)
 
-        # Buttons
         btn_frame = tk.Frame(frame)
-        btn_frame.grid(row=0, column=2, rowspan=5, padx=10, pady=2, sticky="ns")
+        btn_frame.grid(row=0, column=2, rowspan=3, padx=10, pady=2, sticky="ns")
 
         btn_add = tk.Button(btn_frame, text="Add Song", width=16, command=self.add_song)
         btn_update = tk.Button(btn_frame, text="Update Song", width=16, command=self.update_song)
@@ -113,42 +128,38 @@ class LibraryTab(tk.Frame):
         btn_delete.pack(pady=2)
         btn_clear.pack(pady=10)
 
-    # ---------- Helpers ----------
+    # Helpers
 
     def clear_form(self):
         self.selected_song_id = None
-        for entry in (
-            self.entry_title,
-            self.entry_artist,
-            self.entry_album,
-            self.entry_genre,
-            self.entry_year,
-        ):
-            entry.delete(0, tk.END)
+        self.entry_title.delete(0, tk.END)
+        self.entry_artist.delete(0, tk.END)
+        self.entry_genre.delete(0, tk.END)
 
     def populate_listbox(self, songs):
         self.songs = songs
         self.song_listbox.delete(0, tk.END)
         for song in songs:
-            song_id, title, artist, album, genre, year = song
-            display = f"{title} — {artist} [{genre}] ({year})"
+            display = f"{song['name']} — {song['artist']} [{song['genre']}]"
             self.song_listbox.insert(tk.END, display)
 
     def refresh_songs(self):
         try:
-            songs = get_all_songs()
+            songs = get_all_songs()  # list of dicts from Database.py
             self.populate_listbox(songs)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load songs:\n{e}")
 
     def search_songs(self):
         keyword = self.search_entry.get().strip()
-        field = self.search_field.get()
         if not keyword:
             self.refresh_songs()
             return
         try:
-            songs = search_songs(keyword, field)
+            if self.search_field.get() == "name":
+                songs = search_songs_by_name(keyword)
+            else:
+                songs = search_songs_by_genre(keyword)
             self.populate_listbox(songs)
         except Exception as e:
             messagebox.showerror("Error", f"Search failed:\n{e}")
@@ -158,47 +169,31 @@ class LibraryTab(tk.Frame):
             index = self.song_listbox.curselection()[0]
         except IndexError:
             return
-        song = self.songs[index]
-        song_id, title, artist, album, genre, year = song
-        self.selected_song_id = song_id
+        song = self.songs[index]  # dict
+        self.selected_song_id = song["id"]
 
         self.entry_title.delete(0, tk.END)
-        self.entry_title.insert(0, title)
+        self.entry_title.insert(0, song["name"])
 
         self.entry_artist.delete(0, tk.END)
-        self.entry_artist.insert(0, artist)
-
-        self.entry_album.delete(0, tk.END)
-        self.entry_album.insert(0, album)
+        self.entry_artist.insert(0, song["artist"])
 
         self.entry_genre.delete(0, tk.END)
-        self.entry_genre.insert(0, genre)
+        self.entry_genre.insert(0, song["genre"])
 
-        self.entry_year.delete(0, tk.END)
-        self.entry_year.insert(0, str(year))
-
-    # ---------- CRUD actions ----------
+    # CRUD actions
 
     def add_song(self):
         title = self.entry_title.get().strip()
         artist = self.entry_artist.get().strip()
-        album = self.entry_album.get().strip()
         genre = self.entry_genre.get().strip()
-        year = self.entry_year.get().strip()
 
-        if not title or not artist:
-            messagebox.showwarning("Validation", "Title and artist are required.")
+        if not title:
+            messagebox.showwarning("Validation", "Title is required.")
             return
 
         try:
-            if year:
-                int(year)
-        except ValueError:
-            messagebox.showwarning("Validation", "Year must be a number.")
-            return
-
-        try:
-            add_song(title, artist, album, genre, year)
+            create_song(title, artist, genre)
             self.refresh_songs()
             self.clear_form()
         except Exception as e:
@@ -211,23 +206,14 @@ class LibraryTab(tk.Frame):
 
         title = self.entry_title.get().strip()
         artist = self.entry_artist.get().strip()
-        album = self.entry_album.get().strip()
         genre = self.entry_genre.get().strip()
-        year = self.entry_year.get().strip()
 
-        if not title or not artist:
-            messagebox.showwarning("Validation", "Title and artist are required.")
+        if not title:
+            messagebox.showwarning("Validation", "Title is required.")
             return
 
         try:
-            if year:
-                int(year)
-        except ValueError:
-            messagebox.showwarning("Validation", "Year must be a number.")
-            return
-
-        try:
-            update_song(self.selected_song_id, title, artist, album, genre, year)
+            update_song(self.selected_song_id, title, artist, genre)
             self.refresh_songs()
             self.clear_form()
         except Exception as e:
@@ -248,18 +234,13 @@ class LibraryTab(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete song:\n{e}")
 
-    # ---------- Access for other tabs ----------
+    # For playlists tab
 
     def get_selected_song_id(self):
         return self.selected_song_id
 
-    def get_selected_song_display(self):
-        try:
-            index = self.song_listbox.curselection()[0]
-        except IndexError:
-            return None
-        return self.song_listbox.get(index)
 
+# -------------------------- PLAYLISTS TAB -------------------------- #
 
 class PlaylistsTab(tk.Frame):
     """Playlists tab: manage playlists and their songs."""
@@ -269,15 +250,18 @@ class PlaylistsTab(tk.Frame):
 
         self.library_tab = library_tab
 
-        self.playlists = []           # list of (id, name)
+        # list of dicts: {'id', 'name'}
+        self.playlists = []
         self.selected_playlist_id = None
-        self.playlist_songs = []      # songs for selected playlist
+
+        # list of dicts: {'id', 'name', 'artist', 'genre'}
+        self.playlist_songs = []
 
         self._build_layout()
         self.refresh_playlists()
 
     def _build_layout(self):
-        # Left: playlists list + controls
+        # left side: playlists
         left_frame = tk.LabelFrame(self, text="Playlists")
         left_frame.pack(side="left", fill="y", padx=10, pady=5)
 
@@ -291,7 +275,6 @@ class PlaylistsTab(tk.Frame):
 
         self.playlist_listbox.bind("<<ListboxSelect>>", self.on_playlist_select)
 
-        # Add/delete playlist controls
         ctrl_frame = tk.Frame(left_frame)
         ctrl_frame.pack(fill="x", pady=5)
 
@@ -304,7 +287,7 @@ class PlaylistsTab(tk.Frame):
         btn_add_pl.pack(anchor="w", padx=5, pady=2)
         btn_del_pl.pack(anchor="w", padx=5, pady=2)
 
-        # Right: songs in playlist + controls
+        # right side: songs in playlist
         right_frame = tk.LabelFrame(self, text="Songs in Selected Playlist")
         right_frame.pack(side="left", fill="both", expand=True, padx=10, pady=5)
 
@@ -316,7 +299,7 @@ class PlaylistsTab(tk.Frame):
         self.playlist_song_listbox.config(yscrollcommand=scrollbar_ps.set)
         scrollbar_ps.config(command=self.playlist_song_listbox.yview)
 
-        # Buttons under playlist songs
+        # buttons under playlist songs
         btn_frame = tk.Frame(self)
         btn_frame.pack(fill="x", padx=10, pady=5)
 
@@ -334,18 +317,14 @@ class PlaylistsTab(tk.Frame):
         btn_add_song_to_pl.pack(side="left", padx=5)
         btn_remove_song_from_pl.pack(side="left", padx=5)
 
-    # ---------- Playlist helpers ----------
-
-    def populate_playlists(self, playlists):
-        self.playlists = playlists
-        self.playlist_listbox.delete(0, tk.END)
-        for pl_id, name in playlists:
-            self.playlist_listbox.insert(tk.END, name)
+    # playlist helpers
 
     def refresh_playlists(self):
         try:
-            playlists = get_all_playlists()
-            self.populate_playlists(playlists)
+            self.playlists = fetch_all_playlists()
+            self.playlist_listbox.delete(0, tk.END)
+            for pl in self.playlists:
+                self.playlist_listbox.insert(tk.END, pl["name"])
             self.selected_playlist_id = None
             self.playlist_song_listbox.delete(0, tk.END)
         except Exception as e:
@@ -356,8 +335,8 @@ class PlaylistsTab(tk.Frame):
             index = self.playlist_listbox.curselection()[0]
         except IndexError:
             return
-        pl_id, name = self.playlists[index]
-        self.selected_playlist_id = pl_id
+        pl = self.playlists[index]
+        self.selected_playlist_id = pl["id"]
         self.refresh_playlist_songs()
 
     def refresh_playlist_songs(self):
@@ -365,17 +344,15 @@ class PlaylistsTab(tk.Frame):
             self.playlist_song_listbox.delete(0, tk.END)
             return
         try:
-            songs = get_songs_for_playlist(self.selected_playlist_id)
-            self.playlist_songs = songs
+            self.playlist_songs = fetch_songs_for_playlist(self.selected_playlist_id)
             self.playlist_song_listbox.delete(0, tk.END)
-            for song in songs:
-                song_id, title, artist, album, genre, year = song
-                display = f"{title} — {artist} [{genre}] ({year})"
+            for song in self.playlist_songs:
+                display = f"{song['name']} — {song['artist']} [{song['genre']}]"
                 self.playlist_song_listbox.insert(tk.END, display)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load playlist songs:\n{e}")
 
-    # ---------- Playlist actions ----------
+    # playlist actions
 
     def create_playlist(self):
         name = self.entry_playlist_name.get().strip()
@@ -432,7 +409,7 @@ class PlaylistsTab(tk.Frame):
             return
 
         song = self.playlist_songs[index]
-        song_id = song[0]
+        song_id = song["id"]
 
         if not messagebox.askyesno("Confirm", "Remove this song from the playlist?"):
             return
@@ -444,14 +421,13 @@ class PlaylistsTab(tk.Frame):
             messagebox.showerror("Error", f"Failed to remove song from playlist:\n{e}")
 
 
-class MusicOrganizerApp:
-    """Main application window with tabs."""
+# ---------------------------- MAIN APP ---------------------------- #
 
+class MusicOrganizerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Music Organizer")
 
-        # Notebook (tabs)
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
 
@@ -463,9 +439,7 @@ class MusicOrganizerApp:
 
 
 def main():
-    # Initialize database (create tables, etc.)
     init_db()
-
     root = tk.Tk()
     app = MusicOrganizerApp(root)
     root.mainloop()
