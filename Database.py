@@ -157,3 +157,4 @@ def search_songs_by_genre(genre_query: str) -> list[dict]:
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
